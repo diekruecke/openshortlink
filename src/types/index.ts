@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2025 OpenShort.link Contributors
+ *
+ * Licensed under the GNU Affero General Public License Version 3 (AGPL-3.0)
+ * See LICENSE file or https://www.gnu.org/licenses/agpl-3.0.txt
+ */
+
 // Core types for the openshortlink platform
 
 export interface Link {
@@ -20,6 +27,9 @@ export interface Link {
   created_by?: string;
   tags?: Tag[];
   category?: Category;
+  // Joined columns (present when fetched via a JOIN on domains)
+  domain_name?: string;
+  routing_path?: string;
 }
 
 export interface Domain {
@@ -83,6 +93,7 @@ export interface User {
   // Multi-user system
   global_access?: number; // 0 or 1 (SQLite boolean) - 1 = access to all domains
   permission_version?: number; // Incremented when domain access changes (for cache invalidation)
+  must_change_password?: number; // 0 or 1 (SQLite boolean) - 1 = force password change on next login (#11)
 }
 
 export interface UserDomain {
@@ -194,6 +205,21 @@ export interface CachedLink {
     mobile?: string;
     tablet?: string;
   };
+  city_redirects?: Array<{
+    city_name: string;
+    destination_url: string;
+  }>;
+  os_redirects?: {
+    android?: string;
+    ios?: string;
+  };
+  og_meta?: {
+    og_title?: string;
+    og_description?: string;
+    og_image?: string;
+    og_type: string;
+    twitter_card: string;
+  };
   route?: string; // The specific route this link is assigned to (for strict routing)
   domain_routing_path?: string; // The domain's default routing path (for legacy strict routing check)
 }
@@ -220,13 +246,44 @@ export interface Env {
   ANALYTICS_ENGINE_THRESHOLD_DAYS?: string; // Days threshold for using Analytics Engine (default: "89")
   ANALYTICS_AGGREGATION_THRESHOLD_DAYS?: string; // Days threshold for aggregation (default: "90")
   ANALYTICS_AGGREGATION_ENABLED?: string; // "true" or "false" (default: check settings table)
+  // Rate limiting (optional - defaults will be used if not set)
+  RATE_LIMIT_API_KEY?: string; // Default: 100 requests/minute
+  RATE_LIMIT_USER?: string; // Default: 100 requests/minute
+  RATE_LIMIT_IP?: string; // Default: 20 requests/minute
+  // Auth rate limiting (optional - for brute-force protection)
+  FAILED_AUTH_LIMIT?: string; // Default: 5 attempts
+  FAILED_AUTH_WINDOW?: string; // Default: 7200 seconds (2 hours)
+}
+
+// Extended user type for context (includes cached domain access)
+export interface ContextUser {
+  id: string;
+  username?: string;
+  email?: string;
+  role: string;
+  global_access?: boolean;
+  accessible_domain_ids?: string[];
+}
+
+// Session type reference (defined in services/session.ts)
+export interface SessionData {
+  user_id: string;
+  username: string;
+  email?: string;
+  role: string;
+  created_at: number;
+  accessible_domain_ids?: string[];
+  global_access?: boolean;
+  permission_version?: number;
+  cached_at?: number;
 }
 
 export interface Variables {
-  user?: User;
+  user?: ContextUser;
   apiKey?: ApiKeyContext;
   csrfToken?: string;
   nonce?: string;
+  session?: SessionData;
 }
 
 export interface ApiResponse<T = unknown> {

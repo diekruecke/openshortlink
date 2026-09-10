@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2025 OpenShort.link Contributors
+ *
+ * Licensed under the GNU Affero General Public License Version 3 (AGPL-3.0)
+ * See LICENSE file or https://www.gnu.org/licenses/agpl-3.0.txt
+ */
+
 // Database operations for links
 
 import type { Link, Env } from '../types';
@@ -183,9 +190,9 @@ export async function listLinks(
   }
 
   let query = `
-    SELECT l.*, d.domain_name
-    FROM links l 
-    JOIN domains d ON l.domain_id = d.id 
+    SELECT l.*, d.domain_name, d.routing_path
+    FROM links l
+    JOIN domains d ON l.domain_id = d.id
     WHERE l.status != ? AND d.status = 'active'
   `;
   const params: unknown[] = ['deleted'];
@@ -202,7 +209,7 @@ export async function listLinks(
     params.push(options.domainId);
   }
   if (options.status) {
-    query += ' AND status = ?';
+    query += ' AND l.status = ?';
     params.push(options.status);
   }
   if (options.search) {
@@ -385,6 +392,7 @@ export async function listLinksWithTagFilter(
     offset?: number;
     search?: string;
     tagId?: string;
+    categoryId?: string;
   } = {}
 ): Promise<{ links: Link[]; totalCount: number }> {
   // Early return if domainIds is explicitly an empty array (user has no domain access)
@@ -394,7 +402,7 @@ export async function listLinksWithTagFilter(
 
   // Build query with JOINs for database-level filtering
   let query = `
-    SELECT DISTINCT l.*, d.domain_name
+    SELECT DISTINCT l.*, d.domain_name, d.routing_path
     FROM links l
     JOIN domains d ON l.domain_id = d.id
   `;
@@ -438,6 +446,12 @@ export async function listLinksWithTagFilter(
   if (options.tagId) {
     query += ` AND t.id = ?`;
     params.push(options.tagId);
+  }
+
+  // Category filtering
+  if (options.categoryId) {
+    query += ` AND l.category_id = ?`;
+    params.push(options.categoryId);
   }
 
   // Get total count (before pagination)
@@ -620,7 +634,7 @@ export async function getLinksByDestinationUrl(
   } = {}
 ): Promise<Link[]> {
   let query = `
-    SELECT l.*, l.last_status_code, l.last_status_check_at, d.domain_name
+    SELECT l.*, l.last_status_code, l.last_status_check_at, d.domain_name, d.routing_path
     FROM links l
     JOIN domains d ON l.domain_id = d.id
     WHERE l.status != 'deleted' AND l.destination_url = ?

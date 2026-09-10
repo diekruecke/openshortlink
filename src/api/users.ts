@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2025 OpenShort.link Contributors
+ *
+ * Licensed under the GNU Affero General Public License Version 3 (AGPL-3.0)
+ * See LICENSE file or https://www.gnu.org/licenses/agpl-3.0.txt
+ */
+
 // User management API endpoints (admin only)
 
 import { Hono } from 'hono';
@@ -12,13 +19,23 @@ import {
 } from '../db/users';
 import { hashPassword } from '../utils/crypto';
 import { authMiddleware } from '../middleware/auth';
+import { validateJson } from '../middleware/validate';
 import { requireRole } from '../middleware/authorization';
-import { createUserSchema, updateUserSchema, setUserDomainsSchema } from '../utils/validation';
+import { createUserSchema, updateUserSchema, setUserDomainsSchema, strongPasswordSchema } from '../schemas';
 import { setUserDomains, getUserDomains, getAllUserDomains } from '../db/userDomains';
 import { getDomainById } from '../db/domains';
 import { logAuditEvent, getIpAddress, getUserAgent } from '../services/audit';
 
 const usersRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
+
+// Strip secret columns before returning a user in any API response.
+// password_hash / mfa_secret / mfa_backup_codes must never leave the server —
+// mfa_secret in particular would allow generating valid TOTP codes (MFA bypass).
+export function sanitizeUser(user: object): Record<string, unknown> {
+  const { password_hash, mfa_secret, mfa_backup_codes, ...safe } = user as Record<string, unknown>;
+  void password_hash; void mfa_secret; void mfa_backup_codes;
+  return safe;
+}
 
 // List all users (admin only)
 usersRouter.get('/', authMiddleware, requireRole(['admin', 'owner']), async (c) => {
@@ -83,7 +100,7 @@ usersRouter.get('/:id', authMiddleware, requireRole(['admin', 'owner']), async (
   return c.json({
     success: true,
     data: {
-      ...user,
+      ...sanitizeUser(user),
       global_access: user.global_access === 1,
       domain_ids: userDomains.map(ud => ud.domain_id),
     },
@@ -91,9 +108,8 @@ usersRouter.get('/:id', authMiddleware, requireRole(['admin', 'owner']), async (
 });
 
 // Create user (admin only)
-usersRouter.post('/', authMiddleware, requireRole(['admin', 'owner']), async (c) => {
-  const body = await c.req.json();
-  const validated = createUserSchema.parse(body);
+usersRouter.post('/', authMiddleware, requireRole(['admin', 'owner']), validateJson(createUserSchema), async (c) => {
+  const validated = c.req.valid('json');
 
   // Check if username already exists
   const existingUser = await getUserByUsername(c.env, validated.username);
@@ -119,6 +135,15 @@ usersRouter.post('/', authMiddleware, requireRole(['admin', 'owner']), async (c)
     }
   }
 
+  // #13 FIX: Log warning for weak passwords (admin flexibility preserved)
+  // Uses centralized strongPasswordSchema for consistent validation
+  const password = validated.password;
+  const isStrongPassword = strongPasswordSchema.safeParse(password).success;
+  
+  if (!isStrongPassword) {
+    console.warn(`[SECURITY] User "${validated.username}" created with weak password (does not meet strong password requirements)`);
+  }
+
   // Hash password
   const passwordHash = await hashPassword(validated.password);
 
@@ -137,6 +162,7 @@ usersRouter.post('/', authMiddleware, requireRole(['admin', 'owner']), async (c)
     password_hash: passwordHash,
     role: validated.role,
     global_access: globalAccess,
+    must_change_password: validated.must_change_password ? 1 : 0, // #11
   });
 
   // Set domain access if not global
@@ -166,7 +192,7 @@ usersRouter.post('/', authMiddleware, requireRole(['admin', 'owner']), async (c)
   return c.json({
     success: true,
     data: {
-      ...user,
+      ...sanitizeUser(user),
       global_access: globalAccess === 1,
       domain_ids: userDomains.map(ud => ud.domain_id),
     },
@@ -174,10 +200,9 @@ usersRouter.post('/', authMiddleware, requireRole(['admin', 'owner']), async (c)
 });
 
 // Update user (admin only)
-usersRouter.put('/:id', authMiddleware, requireRole(['admin', 'owner']), async (c) => {
+usersRouter.put('/:id', authMiddleware, requireRole(['admin', 'owner']), validateJson(updateUserSchema), async (c) => {
   const id = c.req.param('id');
-  const body = await c.req.json();
-  const validated = updateUserSchema.parse(body);
+  const validated = c.req.valid('json');
 
   const existingUser = await getUserById(c.env, id);
   if (!existingUser) {
@@ -237,6 +262,11 @@ usersRouter.put('/:id', authMiddleware, requireRole(['admin', 'owner']), async (
   if (validated.preferences !== undefined) {
     updates.preferences = JSON.stringify(validated.preferences);
   }
+  if (validated.must_change_password !== undefined) {
+    // #11: admin can (re)require a forced password change
+    (updates as { must_change_password?: number }).must_change_password =
+      validated.must_change_password ? 1 : 0;
+  }
 
   // Update user
   const updatedUser = await updateUser(c.env, id, updates);
@@ -277,7 +307,7 @@ usersRouter.put('/:id', authMiddleware, requireRole(['admin', 'owner']), async (
   return c.json({
     success: true,
     data: {
-      ...updatedUser,
+      ...sanitizeUser(updatedUser),
       global_access: updatedUser.global_access === 1,
       domain_ids: userDomains.map(ud => ud.domain_id),
     },
@@ -285,11 +315,10 @@ usersRouter.put('/:id', authMiddleware, requireRole(['admin', 'owner']), async (
 });
 
 // Set user's domain access (admin only)
-usersRouter.put('/:id/domains', authMiddleware, requireRole(['admin', 'owner']), async (c) => {
+usersRouter.put('/:id/domains', authMiddleware, requireRole(['admin', 'owner']), validateJson(setUserDomainsSchema), async (c) => {
   try {
     const id = c.req.param('id');
-    const body = await c.req.json();
-    const validated = setUserDomainsSchema.parse(body);
+    const validated = c.req.valid('json');
 
     const user = await getUserById(c.env, id);
     if (!user) {

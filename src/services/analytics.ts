@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2025 OpenShort.link Contributors
+ *
+ * Licensed under the GNU Affero General Public License Version 3 (AGPL-3.0)
+ * See LICENSE file or https://www.gnu.org/licenses/agpl-3.0.txt
+ */
+
 // Analytics service for tracking clicks
 
 import type { ClickEvent, Env } from '../types';
@@ -135,10 +142,10 @@ export function parseUserAgent(userAgent: string): {
   // Detect OS
   let os = 'unknown';
   if (ua.includes('windows')) os = 'windows';
+  else if (ua.includes('android')) os = 'android';
+  else if (ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod') || ua.includes('ios')) os = 'ios';
   else if (ua.includes('mac')) os = 'macos';
   else if (ua.includes('linux')) os = 'linux';
-  else if (ua.includes('android')) os = 'android';
-  else if (ua.includes('ios')) os = 'ios';
 
   return { device_type, browser, os };
 }
@@ -339,4 +346,3 @@ export function calculateGrowth(current: number, previous: number): {
 
   return { percentage: Math.round(percentage * 100) / 100, trend };
 }
-

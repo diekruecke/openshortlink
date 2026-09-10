@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2025 OpenShort.link Contributors
+ *
+ * Licensed under the GNU Affero General Public License Version 3 (AGPL-3.0)
+ * See LICENSE file or https://www.gnu.org/licenses/agpl-3.0.txt
+ */
+
 // Database operations for analytics aggregations
 
 import type { Env, AnalyticsDaily, AnalyticsGeo, AnalyticsReferrer, AnalyticsDevice, AnalyticsUtm, AnalyticsCustomParam } from '../types';

@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2025 OpenShort.link Contributors
+ *
+ * Licensed under the GNU Affero General Public License Version 3 (AGPL-3.0)
+ * See LICENSE file or https://www.gnu.org/licenses/agpl-3.0.txt
+ */
+
 export const baseCss = `/* Root Variables */
 :root {
   --bg-color: #f8fafc;
@@ -21,6 +28,13 @@ export const baseCss = `/* Root Variables */
   --sidebar-active: #6366f1;
   --warning-bg: #fff3cd;
   --warning-border: #ffeeba;
+  /* Callout backgrounds for inline info/success boxes (dark variants in dark-mode.css) */
+  --info-bg: #e7f3ff;
+  --success-bg: #e8f5e9;
+  /* Callout text/heading accents — readable on both light and dark callout backgrounds */
+  --info-text: #004085;
+  --warning-text: #856404;
+  --success-text: #2e7d32;
 }
 
 /* Reset & Base */

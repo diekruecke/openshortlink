@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2025 OpenShort.link Contributors
+ *
+ * Licensed under the GNU Affero General Public License Version 3 (AGPL-3.0)
+ * See LICENSE file or https://www.gnu.org/licenses/agpl-3.0.txt
+ */
+
 // Analytics aggregation service
 // Aggregates Analytics Engine data into D1 for long-term storage and querying
 // Note: With real-time aggregation enabled, this is mainly used for:
@@ -57,10 +64,10 @@ export async function aggregateAnalyticsForDate(
     }
 
     // Get link IDs to aggregate (if not provided, aggregate all links)
-    const allLinkIds = linkIds || [];
+    const filters = linkIds && linkIds.length > 0 ? { linkIds } : {};
 
     // Query raw events from Analytics Engine SQL API for this date
-    const rawEvents = await getRawEventsFromEngine(env, allLinkIds, date, date);
+    const rawEvents = await getRawEventsFromEngine(env, filters, date, date);
 
     if (rawEvents.length === 0) {
       // DEBUG: console.log(`[AGGREGATION] No events found for date ${date}`);

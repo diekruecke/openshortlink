@@ -1,17 +1,27 @@
+/**
+ * Copyright (c) 2025 OpenShort.link Contributors
+ *
+ * Licensed under the GNU Affero General Public License Version 3 (AGPL-3.0)
+ * See LICENSE file or https://www.gnu.org/licenses/agpl-3.0.txt
+ */
+
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import type { Env } from '../types';
 import { authOrApiKeyMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/authorization';
-import { createLink } from '../db/links';
+import { createLink, deleteLink } from '../db/links';
 import { getDomainById } from '../db/domains';
 import { generateSlug } from '../utils/id';
 import { isValidUrl, isValidSlug, normalizeUrl, isReservedSlug } from '../utils/validation';
 import { checkSlugExists } from '../db/links';
-import { upsertGeoRedirect, upsertDeviceRedirect, getGeoRedirects, getDeviceRedirects } from '../db/linkRedirects';
-import { setLinkTags } from '../db/tags';
+import { upsertGeoRedirect, upsertDeviceRedirect, getGeoRedirects, getDeviceRedirects,
+         upsertCityRedirect, upsertOsRedirect, getCityRedirects, getOsRedirects } from '../db/linkRedirects';
+import { setLinkTags, listTags, createTag, getTagById } from '../db/tags';
+import { listCategories, createCategory, getCategoryById } from '../db/categories';
 import { setCachedLink } from '../services/cache';
+import { getEffectiveLinkRoute } from '../utils/route';
 
 const importRouter = new Hono<{ Bindings: Env }>();
 
@@ -66,6 +76,80 @@ importRouter.post('/', authOrApiKeyMiddleware, requirePermission('create_links')
             return c.json({ success: true, data: { success: 0, errors: 0, results: [] } });
         }
 
+        // #14: resolve a CSV "Tags" column of human-friendly NAMES (or existing IDs)
+        // into tag IDs, creating missing domain-scoped tags. Built once and reused
+        // across rows so a name typed in several rows maps to a single tag.
+        const tagNameToId = new Map<string, string>();
+        const knownTagIds = new Set<string>();
+        for (const t of await listTags(c.env, { domainId })) {
+            if (t.name) tagNameToId.set(t.name.toLowerCase(), t.id);
+            knownTagIds.add(t.id);
+        }
+        const MAX_NAME = 50; // matches createTagSchema / createCategorySchema
+        const resolveTagIds = async (values: string[]): Promise<string[]> => {
+            const ids: string[] = [];
+            for (const value of values) {
+                // Accept an existing tag ID as-is (backward compatible with ID-based CSVs)...
+                if (knownTagIds.has(value)) {
+                    ids.push(value);
+                    continue;
+                }
+                // ...including a global/cross-domain tag ID we didn't preload (verify it exists,
+                // so an ID-based CSV doesn't get turned into a literal "tag_..." name).
+                if (value.startsWith('tag_') && await getTagById(c.env, value)) {
+                    knownTagIds.add(value);
+                    ids.push(value);
+                    continue;
+                }
+                // ...otherwise treat it as a name: validate, then reuse if present, else create.
+                if (value.length > MAX_NAME) {
+                    throw new Error(`Tag name too long (max ${MAX_NAME}): ${value}`);
+                }
+                const key = value.toLowerCase();
+                let id = tagNameToId.get(key);
+                if (!id) {
+                    const created = await createTag(c.env, { name: value, domain_id: domainId });
+                    id = created.id;
+                    tagNameToId.set(key, id);
+                    knownTagIds.add(id);
+                }
+                ids.push(id);
+            }
+            // Dedupe so setLinkTags never inserts the same (link_id, tag_id) twice
+            // (e.g. "news, News" or an existing ID plus its name).
+            return [...new Set(ids)];
+        };
+
+        // #14: resolve a Category column of a NAME (or existing ID) into a category ID —
+        // reuse an existing category by name, else create it — so a CSV exported by this
+        // dashboard (Category column holds the name) round-trips instead of failing.
+        const catNameToId = new Map<string, string>();
+        const knownCatIds = new Set<string>();
+        for (const cat of await listCategories(c.env, { domainId })) {
+            if (cat.name) catNameToId.set(cat.name.toLowerCase(), cat.id);
+            knownCatIds.add(cat.id);
+        }
+        const resolveCategoryId = async (value: string): Promise<string> => {
+            if (knownCatIds.has(value)) return value;
+            // A global/cross-domain category ID we didn't preload: accept if it exists.
+            if (value.startsWith('cat_') && await getCategoryById(c.env, value)) {
+                knownCatIds.add(value);
+                return value;
+            }
+            if (value.length > MAX_NAME) {
+                throw new Error(`Category name too long (max ${MAX_NAME}): ${value}`);
+            }
+            const key = value.toLowerCase();
+            let id = catNameToId.get(key);
+            if (!id) {
+                const created = await createCategory(c.env, { name: value, domain_id: domainId });
+                id = created.id;
+                catNameToId.set(key, id);
+                knownCatIds.add(id);
+            }
+            return id;
+        };
+
         // Process rows
         const results = [];
         let successCount = 0;
@@ -79,6 +163,9 @@ importRouter.post('/', authOrApiKeyMiddleware, requirePermission('create_links')
             // Skip empty rows
             if (Object.keys(row).length === 0) continue;
 
+            // Tracks a link created in this row so we can roll it back if a later
+            // step (tags/redirects/cache) fails — keeps each row all-or-nothing.
+            let createdLinkId: string | null = null;
             try {
                 // Extract data based on mapping or auto-detection
                 // The row is an object with keys as headers (if headers exist) or indices
@@ -91,6 +178,8 @@ importRouter.post('/', authOrApiKeyMiddleware, requirePermission('create_links')
                 let description = row['description'] || row['desc'];
                 let tagsStr = row['tags'] || row['tag'];
                 let route = row['route'] || row['path_prefix'];
+                let categoryId = row['category_id'] || row['category'];
+                let redirectCodeStr = row['redirect_code'];
 
                 // If column mapping is provided, override
                 // Mapping format: { "csv_header": "field_name" }
@@ -103,7 +192,20 @@ importRouter.post('/', authOrApiKeyMiddleware, requirePermission('create_links')
                         else if (fieldName === 'description') description = row[csvHeader];
                         else if (fieldName === 'tags') tagsStr = row[csvHeader];
                         else if (fieldName === 'route') route = row[csvHeader];
+                        else if (fieldName === 'category_id') categoryId = row[csvHeader];
+                        else if (fieldName === 'redirect_code') redirectCodeStr = row[csvHeader];
                     }
+                }
+
+                // Validate redirect code if provided (else default to 301). Without this,
+                // a mapped "Redirect Code" column would be silently ignored.
+                let redirectCode = 301;
+                if (redirectCodeStr !== undefined && String(redirectCodeStr).trim() !== '') {
+                    const parsed = parseInt(String(redirectCodeStr).trim(), 10);
+                    if (![301, 302, 307, 308].includes(parsed)) {
+                        throw new Error(`Invalid redirect code: ${redirectCodeStr} (allowed: 301, 302, 307, 308)`);
+                    }
+                    redirectCode = parsed;
                 }
 
                 if (!destinationUrl) {
@@ -121,12 +223,14 @@ importRouter.post('/', authOrApiKeyMiddleware, requirePermission('create_links')
                 }
                 destinationUrl = normalizeUrl(destinationUrl);
 
-                // Validate route if provided
+                // Validate route if explicitly provided, then default to the domain's
+                // primary route so imported links are reachable and display correctly.
                 if (route) {
                     if (!domain.routes || !domain.routes.includes(route)) {
                         throw new Error(`Invalid route: ${route}`);
                     }
                 }
+                const effectiveRoute = getEffectiveLinkRoute(domain, route);
 
                 // Generate or validate slug
                 if (slug) {
@@ -151,10 +255,17 @@ importRouter.post('/', authOrApiKeyMiddleware, requirePermission('create_links')
                     }
                 }
 
-                // Prepare metadata
+                // Resolve category AFTER all pre-insert validation (slug etc.) so a row that
+                // fails validation never creates a stray category. Stored in its own column.
+                let validCategoryId: string | undefined = undefined;
+                if (categoryId) {
+                    validCategoryId = await resolveCategoryId(categoryId);
+                }
+
+                // Prepare metadata (route stored here; category goes in its own column)
                 let metadata: string | undefined = undefined;
-                if (route) {
-                    metadata = JSON.stringify({ route });
+                if (effectiveRoute) {
+                    metadata = JSON.stringify({ route: effectiveRoute });
                 }
 
                 // Create link
@@ -164,18 +275,21 @@ importRouter.post('/', authOrApiKeyMiddleware, requirePermission('create_links')
                     destination_url: destinationUrl,
                     title: title || undefined,
                     description: description || undefined,
-                    redirect_code: 301,
+                    redirect_code: redirectCode,
                     status: 'active',
                     click_count: 0,
                     unique_visitors: 0,
+                    category_id: validCategoryId,
                     metadata,
                 });
+                createdLinkId = link.id;
 
-                // Handle tags
+                // Handle tags — resolve names (or existing IDs) to tag IDs (#14)
                 if (tagsStr) {
-                    const tags = tagsStr.split(',').map((t: string) => t.trim()).filter((t: string) => t.length > 0);
-                    if (tags.length > 0) {
-                        await setLinkTags(c.env, link.id, tags);
+                    const tagValues = tagsStr.split(',').map((t: string) => t.trim()).filter((t: string) => t.length > 0);
+                    if (tagValues.length > 0) {
+                        const tagIds = await resolveTagIds(tagValues);
+                        await setLinkTags(c.env, link.id, tagIds);
                     }
                 }
 
@@ -200,10 +314,18 @@ importRouter.post('/', authOrApiKeyMiddleware, requirePermission('create_links')
 
                     let countryCode = null;
                     let deviceType = null;
+                    let cityName: string | null = null;
+                    let osType: string | null = null;
 
                     if (mappedType) {
                         if (mappedType.startsWith('geo:')) {
                             countryCode = mappedType.split(':')[1];
+                        } else if (mappedType.startsWith('city:') || mappedType.startsWith('city_redirect:')) {
+                            cityName = mappedType.substring(mappedType.indexOf(':') + 1);
+                        } else if (mappedType.startsWith('os:') || mappedType.startsWith('os_redirect:')) {
+                            osType = mappedType.substring(mappedType.indexOf(':') + 1).toLowerCase();
+                        } else if (mappedType.startsWith('device_redirect:')) {
+                            deviceType = mappedType.substring('device_redirect:'.length);
                         } else if (mappedType === 'mobile') {
                             deviceType = 'mobile';
                         } else if (mappedType === 'desktop') {
@@ -233,15 +355,21 @@ importRouter.post('/', authOrApiKeyMiddleware, requirePermission('create_links')
 
                     if (countryCode && isValidUrl(value as string)) {
                         await upsertGeoRedirect(c.env, link.id, countryCode, value as string);
-                    } else if (deviceType && isValidUrl(value as string)) {
-                        await upsertDeviceRedirect(c.env, link.id, deviceType as 'mobile' | 'desktop' | 'tablet', value as string);
+                    } else if ((deviceType === 'mobile' || deviceType === 'desktop' || deviceType === 'tablet') && isValidUrl(value as string)) {
+                        await upsertDeviceRedirect(c.env, link.id, deviceType, value as string);
+                    } else if (cityName && isValidUrl(value as string)) {
+                        await upsertCityRedirect(c.env, link.id, cityName, value as string);
+                    } else if ((osType === 'android' || osType === 'ios') && isValidUrl(value as string)) {
+                        await upsertOsRedirect(c.env, link.id, osType, value as string);
                     }
                 }
 
                 // Fetch redirects and cache the link for optimal redirect performance
-                const [geoRedirects, deviceRedirects] = await Promise.all([
+                const [geoRedirects, deviceRedirects, cityRedirects, osRedirects] = await Promise.all([
                     getGeoRedirects(c.env, link.id),
-                    getDeviceRedirects(c.env, link.id)
+                    getDeviceRedirects(c.env, link.id),
+                    getCityRedirects(c.env, link.id),
+                    getOsRedirects(c.env, link.id)
                 ]);
 
                 const cachedLink = {
@@ -263,6 +391,17 @@ importRouter.post('/', authOrApiKeyMiddleware, requirePermission('create_links')
                                 tablet: deviceRedirects.find((r) => r.device_type === 'tablet')?.destination_url,
                             }
                             : undefined,
+                    city_redirects:
+                        cityRedirects.length > 0
+                            ? cityRedirects.map((r) => ({ city_name: r.city_name, destination_url: r.destination_url }))
+                            : undefined,
+                    os_redirects:
+                        osRedirects.length > 0
+                            ? {
+                                android: osRedirects.find((r) => r.os === 'android')?.destination_url,
+                                ios: osRedirects.find((r) => r.os === 'ios')?.destination_url,
+                            }
+                            : undefined,
                     route: link.metadata ? (() => {
                         try { return JSON.parse(link.metadata).route; } catch { return undefined; }
                     })() : undefined,
@@ -275,6 +414,16 @@ importRouter.post('/', authOrApiKeyMiddleware, requirePermission('create_links')
                 results.push({ row: i, success: true, slug: link.slug });
 
             } catch (error: any) {
+                // Roll back a partially-created row: if the link was inserted but a
+                // later step failed, hard-delete it (FK ON DELETE CASCADE removes its
+                // tags/redirects) so a failed row leaves nothing behind.
+                if (createdLinkId) {
+                    try {
+                        await deleteLink(c.env, createdLinkId, true);
+                    } catch (cleanupErr) {
+                        console.error(`Import row ${i}: cleanup of link ${createdLinkId} failed:`, cleanupErr);
+                    }
+                }
                 errorCount++;
                 results.push({ row: i, success: false, error: error.message });
             }
@@ -290,6 +439,11 @@ importRouter.post('/', authOrApiKeyMiddleware, requirePermission('create_links')
         });
 
     } catch (error: any) {
+        // Preserve intended client errors (e.g. 400 "Domain ID is required", 404
+        // "Domain not found") instead of masking every failure as a 500.
+        if (error instanceof HTTPException) {
+            throw error;
+        }
         console.error('Import error:', error);
         throw new HTTPException(500, { message: error.message || 'Import failed' });
     }

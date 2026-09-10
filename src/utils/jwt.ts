@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2025 OpenShort.link Contributors
+ *
+ * Licensed under the GNU Affero General Public License Version 3 (AGPL-3.0)
+ * See LICENSE file or https://www.gnu.org/licenses/agpl-3.0.txt
+ */
+
+/**
  * JWT utility functions for Cloudflare Access token validation
  * 
  * NOTE: This code is NOT currently used - Cloudflare Access integration is not implemented.

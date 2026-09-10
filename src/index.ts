@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2025 OpenShort.link Contributors
+ *
+ * Licensed under the GNU Affero General Public License Version 3 (AGPL-3.0)
+ * See LICENSE file or https://www.gnu.org/licenses/agpl-3.0.txt
+ */
+
 // Main Cloudflare Worker entry point
 
 import { Hono } from 'hono';
@@ -10,6 +17,8 @@ import { securityHeaders } from './middleware/security';
 import { cacheControl } from './middleware/cache-control';
 import { handleRedirect } from './services/redirect';
 import { getDomainByRoutingPath } from './db/domains';
+import { getRootPageSettingsOrDefault } from './db/settings';
+import { escapeHtml } from './utils/html';
 
 // Import API routes (static - they're small and needed for functionality)
 import { linksRouter } from './api/links';
@@ -39,19 +48,32 @@ app.use('*', cors({
 // Redirects are GET-only and don't return HTML, so these are unnecessary
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname;
+  
   // Apply CSRF/security for dashboard and API routes only
   // Everything else is a redirect route
   const isAdminRoute = path.startsWith('/dashboard') || path.startsWith('/api');
   
-  if (isAdminRoute) {
+  // Exclude auth endpoints from CSRF (they create sessions, can't have CSRF token before login)
+  const isAuthEndpoint = path === '/api/auth/login' || 
+                         path === '/api/auth/register' ||
+                         path === '/api/auth/refresh' ||
+                         path === '/api/auth/mfa/verify';
+  
+  if (isAdminRoute && !isAuthEndpoint) {
     // Apply CSRF and security headers for dashboard/API routes
     // Chain them properly: CSRF first, then security headers
     await csrfProtection(c, async () => {
       await securityHeaders(c, next);
     });
+  } else if (isAdminRoute && isAuthEndpoint) {
+    // Auth endpoints: security headers only, no CSRF
+    await securityHeaders(c, next);
   } else {
-    // Skip for redirect routes - just continue
-    await next();
+    // Public routes (redirects + the root/route landing page, which can now return
+    // branded or custom HTML): apply security headers. No CSRF — GET-only, no session
+    // writes. CSP allows inline styles ('unsafe-inline') so the branded page renders,
+    // and blocks unnonced inline scripts in custom-HTML mode.
+    await securityHeaders(c, next);
   }
 });
 
@@ -65,6 +87,56 @@ app.use('/api/*', cacheControl);
 // Dashboard - Health check (moved under /dashboard)
 app.get('/dashboard/health', (c) => {
   return c.json({ status: 'ok', timestamp: Date.now() });
+});
+
+// Debug - Returns Cloudflare GeoIP headers for the current visitor
+// Useful for users to verify exact city/country names before setting up redirect rules
+app.get('/api/v1/debug/my-location', (c) => {
+  // request.cf is populated by Cloudflare by default; the cf-* headers require the
+  // "visitor location headers" Managed Transform, so fall back to them if present.
+  const cf = (c.req.raw as { cf?: Record<string, string> }).cf || {};
+  const city = cf.city || c.req.header('cf-ipcity') || null;
+  const country = cf.country || c.req.header('cf-ipcountry') || null;
+  const region = cf.region || c.req.header('cf-region') || null;
+  const regionCode = cf.regionCode || c.req.header('cf-region-code') || null;
+  const timezone = cf.timezone || c.req.header('cf-timezone') || null;
+
+  return c.json({
+    success: true,
+    data: {
+      city,
+      country,
+      region,
+      region_code: regionCode,
+      timezone,
+      note: 'Use these exact values when setting up city/country redirect rules. City matching is case-insensitive.',
+      docs: 'https://developers.cloudflare.com/fundamentals/reference/http-request-headers/#cf-ipcity',
+    },
+  });
+});
+
+app.get('/dashboard/api/v1/debug/my-location', (c) => {
+  // request.cf is populated by Cloudflare by default; the cf-* headers require the
+  // "visitor location headers" Managed Transform, so fall back to them if present.
+  const cf = (c.req.raw as { cf?: Record<string, string> }).cf || {};
+  const city = cf.city || c.req.header('cf-ipcity') || null;
+  const country = cf.country || c.req.header('cf-ipcountry') || null;
+  const region = cf.region || c.req.header('cf-region') || null;
+  const regionCode = cf.regionCode || c.req.header('cf-region-code') || null;
+  const timezone = cf.timezone || c.req.header('cf-timezone') || null;
+
+  return c.json({
+    success: true,
+    data: {
+      city,
+      country,
+      region,
+      region_code: regionCode,
+      timezone,
+      note: 'Use these exact values when setting up city/country redirect rules. City matching is case-insensitive.',
+      docs: 'https://developers.cloudflare.com/fundamentals/reference/http-request-headers/#cf-ipcity',
+    },
+  });
 });
 
 // Dashboard - Validation endpoint (moved under /dashboard)
@@ -296,7 +368,19 @@ app.get('*', async (c) => {
   const slug = path.replace(routingPath, '').replace(/^\//, '').replace(/\/$/, '');
 
   if (!slug) {
-    return c.text('Slug required', 400);
+    // #12: serve the configured default page for the domain root (no slug given).
+    const rootPage = await getRootPageSettingsOrDefault(c.env);
+
+    if (rootPage.mode === 'redirect' && rootPage.redirect_url) {
+      return Response.redirect(rootPage.redirect_url, 302);
+    }
+
+    if (rootPage.mode === 'html' && rootPage.html.trim()) {
+      return c.html(rootPage.html);
+    }
+
+    // Default: a built-in branded welcome page.
+    return c.html(renderBrandedRootPage(domainObj.domain_name));
   }
 
   // Handle redirect (pass execution context for proper async tracking)
@@ -343,6 +427,39 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
       }
     })());
   }
+}
+
+// #12: built-in branded welcome page served at a domain root when no custom
+// page or redirect is configured. domainName is escaped (it originates from the DB).
+function renderBrandedRootPage(domainName: string): string {
+  const safeDomain = escapeHtml(domainName);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${safeDomain}</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%); color: #fff; }
+    .card { text-align: center; padding: 2.5rem; max-width: 480px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; }
+    p { opacity: 0.85; line-height: 1.6; margin: 0.5rem 0; }
+    .domain { font-weight: 600; }
+    .footer { margin-top: 2rem; font-size: 0.8rem; opacity: 0.6; }
+    a { color: #fff; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🔗 ${safeDomain}</h1>
+    <p>This is a URL shortener powered by <span class="domain">OpenShort.link</span>.</p>
+    <p>Short links on this domain redirect to their destinations. There's nothing to see here.</p>
+    <div class="footer">Powered by <a href="https://openshort.link" rel="noopener noreferrer">OpenShort.link</a></div>
+  </div>
+</body>
+</html>`;
 }
 
 // Export default object with both fetch (HTTP handler) and scheduled (cron handler)

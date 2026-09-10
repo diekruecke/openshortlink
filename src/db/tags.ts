@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2025 OpenShort.link Contributors
+ *
+ * Licensed under the GNU Affero General Public License Version 3 (AGPL-3.0)
+ * See LICENSE file or https://www.gnu.org/licenses/agpl-3.0.txt
+ */
+
 // Database operations for tags
 
 import type { Tag, Env } from '../types';
@@ -205,8 +212,8 @@ export async function getLinksTagsBatch(
     tagsMap.get(row.link_id)!.push({
       id: row.id,
       name: row.name || '',
-      domain_id: row.domain_id,
-      color: row.color,
+      domain_id: row.domain_id ?? undefined,
+      color: row.color ?? undefined,
       created_at: row.created_at,
     });
   }

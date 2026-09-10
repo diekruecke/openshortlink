@@ -1,6 +1,17 @@
-import { createMiddleware } from 'hono/factory';
+/**
+ * Copyright (c) 2025 OpenShort.link Contributors
+ *
+ * Licensed under the GNU Affero General Public License Version 3 (AGPL-3.0)
+ * See LICENSE file or https://www.gnu.org/licenses/agpl-3.0.txt
+ */
 
-export const securityHeaders = createMiddleware(async (c, next) => {
+// Security Headers Middleware
+// Phase 2: Using createMiddleware with proper typing
+
+import { createMiddleware } from 'hono/factory';
+import type { Env, Variables } from '../types';
+
+export const securityHeaders = createMiddleware<{ Bindings: Env; Variables: Variables }>(async (c, next) => {
     // Generate a random nonce for this request
     const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
     c.set('nonce', nonce);

@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2025 OpenShort.link Contributors
+ *
+ * Licensed under the GNU Affero General Public License Version 3 (AGPL-3.0)
+ * See LICENSE file or https://www.gnu.org/licenses/agpl-3.0.txt
+ */
+
 export const darkModeCss = `/* Dark Mode Overrides */
 .dark-mode {
   --bg-color: #0f172a;
@@ -21,6 +28,13 @@ export const darkModeCss = `/* Dark Mode Overrides */
   --sidebar-active: #818cf8;
   --warning-bg: #4a3e10;
   --warning-border: #d9a406;
+  /* Dark variants of the inline callout backgrounds (light values in base.css) */
+  --info-bg: #0c4a6e;
+  --success-bg: #14432a;
+  /* Light text/heading accents for callouts in dark mode */
+  --info-text: #bae6fd;
+  --warning-text: #fde68a;
+  --success-text: #86efac;
 }
 
 .dark-mode .json-key { color: #79c0ff; }

@@ -3,6 +3,8 @@ main = "src/index.ts"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+workers_dev = false
+preview_url = false
 
 # D1 Database
 # Note: database_id does NOT support environment variable substitution
@@ -46,10 +48,6 @@ MAX_LINKS_PER_DOMAIN = "10000"
 #   SETUP_TOKEN - Generated with: openssl rand -hex 32
 #   CLOUDFLARE_ACCOUNT_ID - Your Cloudflare account ID
 #   CLOUDFLARE_API_TOKEN - API token with "Account Analytics Read" permission
-
-
-
-
 
 # Cron triggers for scheduled tasks
 # Daily tasks (midnight UTC): analytics aggregation and top 100 status check
